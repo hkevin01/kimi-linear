@@ -1,0 +1,34 @@
+FROM nvidia/cuda:12.0.0-devel-ubuntu22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    python3.10 \
+    python3-pip \
+    git \
+    wget \
+    vim \
+    htop \
+    nvtop \
+    gdb \
+    valgrind \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m pip install --upgrade pip
+
+WORKDIR /workspace
+
+# Install dev dependencies
+COPY requirements.txt requirements-dev.txt* ./
+RUN pip install --no-cache-dir -r requirements.txt && \
+    if [ -f requirements-dev.txt ]; then pip install --no-cache-dir -r requirements-dev.txt; fi
+
+# Install additional dev tools
+RUN pip install ipython jupyter notebook jupyterlab
+
+# Expose Jupyter port
+EXPOSE 8888
+
+CMD ["/bin/bash"]
