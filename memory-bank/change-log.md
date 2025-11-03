@@ -16,10 +16,49 @@ applyTo: '**'
 
 ## [Unreleased]
 
-### 2025-01-XX - Initial Project Setup
+### 2025-11-03 - README Enhancement with Visual Documentation (📝)
+**Component**: README.md
+**Type**: Added
+**Description**:
+- Added comprehensive Technology Stack section with 10 technologies explained
+- Created 5 new Mermaid diagrams with dark theme (fill:#2c3e50)
+- Enhanced Performance section with detailed comparison tables
+- Added architecture components mindmap
+- Included complexity analysis for all components
+
+**Technical Details**:
+- Technology comparison table: PyTorch 2.6+, CUDA 12.0, Triton, Flash Attention, vLLM, Docker, pytest, Black, NumPy, Einops
+- Architecture mindmap covering: Core Modules, Attention Layers, Optimization, Memory Management
+- Component complexity table with Big-O notation for 6 components
+- Key design decisions table with 8 architectural choices
+- Performance scaling visualization showing 1.05×-6.24× speedup
+- TPOT analysis revealing constant ~1.84ms decoding regardless of context
+- Memory efficiency comparison showing 75% reduction at 128K-1M context
+- Attention mechanism comparison: Full vs Linear vs Kimi Hybrid
+- Enhanced accuracy benchmarks with winner indicators
+- Throughput scaling table showing OOM boundaries
+
+**Visual Elements**:
+- Mermaid scaling visualization (performance + memory reduction)
+- Architecture components mindmap (dark theme)
+- Attention mechanism comparison flowchart
+- Enhanced tables with emoji indicators: ⚡(speed), 💾(memory), ✅(winner), 🥈(second), 💥(OOM)
+- Dark theme configuration: `%%{init: {'theme':'dark', 'themeVariables': {...}}}%%`
+
+**Documentation Metrics**:
+- README size: 946 → 1,207 lines (+261 lines, +27.6%)
+- New tables: 9 comparison tables
+- New diagrams: 5 Mermaid visualizations
+- Technology explanations: 10 detailed entries
+- Design decisions documented: 8 key choices
+
+**Testing**: Visual inspection of Mermaid rendering, table formatting verification
+**Contributors**: Documentation Team
+
+### 2025-01-XX - Initial Project Setup (📝)
 **Component**: Project Structure
 **Type**: Added
-**Description**: 
+**Description**:
 - Created complete project directory structure
 - Set up src layout with modular organization
 - Initialized memory-bank system
@@ -81,7 +120,7 @@ Code restructuring without behavior change
 ### YYYY-MM-DD - [Component Name]
 **Component**: [Module/Feature]
 **Type**: [Added|Modified|Fixed|Removed|Optimized]
-**Description**: 
+**Description**:
 [Detailed description of what changed and why]
 
 **Technical Details**:
@@ -158,7 +197,7 @@ Code restructuring without behavior change
 
 ### 📊 Performance Metrics
 - **FineGrainedGating:** 2.35ms avg forward time ✅
-- **StateManager:** 2.65ms avg update time ✅  
+- **StateManager:** 2.65ms avg update time ✅
 - **DPLRTransition:** 1.30ms avg transition time ✅
 - **Total Lines of Code:** ~1,200 (implementation only)
 - **Documentation Coverage:** 95%
