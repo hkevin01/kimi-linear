@@ -4,10 +4,10 @@ setup(
     name="kimi-linear",
     version="0.1.0",
     author="Kimi Linear Optimization Team",
-    description="Optimized implementation of Kimi Linear hybrid attention architecture",
+    description="Kimi Linear hybrid KDA/MLA attention — chunkwise parallel, vLLM-ready",
     long_description=open("README.md").read(),
     long_description_content_type="text/markdown",
-    url="https://github.com/YOUR_USERNAME/kimi-linear",
+    url="https://github.com/hkevin01/kimi-linear",
     packages=find_packages(where="src"),
     package_dir={"": "src"},
     classifiers=[
@@ -23,10 +23,14 @@ setup(
     install_requires=[
         "torch>=2.6.0",
         "numpy>=1.24.0",
-        "fla-core>=0.4.0",
-        "transformers>=4.40.0",
     ],
     extras_require={
+        "fla": [
+            "flash-linear-attention>=0.4.0",  # Triton kernels (optional)
+        ],
+        "vllm": [
+            "vllm>=0.4.0",                    # vLLM deployment (optional)
+        ],
         "dev": [
             "pytest>=7.4.0",
             "pytest-cov>=4.1.0",

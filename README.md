@@ -209,7 +209,23 @@ flowchart LR
 - PyTorch ≥ 2.6 (CPU or CUDA)
 - CUDA ≥ 12.0 for GPU acceleration (optional)
 
-### From source
+### Install into your own project (recommended)
+
+```bash
+# From PyPI (once published)
+pip install kimi-linear
+
+# From GitHub — always up to date
+pip install git+https://github.com/hkevin01/kimi-linear.git
+
+# With optional Triton kernels (requires CUDA)
+pip install "git+https://github.com/hkevin01/kimi-linear.git#egg=kimi-linear[fla]"
+
+# With vLLM deployment support
+pip install "git+https://github.com/hkevin01/kimi-linear.git#egg=kimi-linear[vllm]"
+```
+
+### Developer install (editable — for contributing)
 
 ```bash
 git clone https://github.com/hkevin01/kimi-linear.git
@@ -217,12 +233,6 @@ cd kimi-linear
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
-```
-
-### Dependencies only
-
-```bash
-pip install -r requirements.txt
 ```
 
 ### Docker
@@ -239,13 +249,13 @@ docker build -f docker/Dockerfile -t kimi-linear:latest .
 ### Verify installation
 
 ```bash
-python -c "from src.kda import KDALayer; print('KDALayer OK')"
+python -c "import kda; print(kda.__version__)"
 pytest tests/ -q
-# 45 passed in ~1.2s
+# 130 passed in ~1.6s
 ```
 
 > [!NOTE]
-> The `.venv` virtualenv is in `.gitignore`. Always activate it before running scripts or tests.
+> After `pip install`, the package is importable as `import kda` from any project in that environment. No need to be inside the kimi-linear directory.
 
 <p align="right">(<a href="#top">back to top ↑</a>)</p>
 
@@ -253,11 +263,13 @@ pytest tests/ -q
 
 ## 🚀 Usage
 
+> After `pip install kimi-linear` (or the editable install), all imports use `import kda`.
+
 ### Single KDA layer
 
 ```python
 import torch
-from src.kda import KDALayer
+from kda import KDALayer
 
 layer = KDALayer(
     hidden_dim=512,
@@ -273,19 +285,142 @@ print(output.shape)                  # torch.Size([4, 128, 512])
 print(state.shape)                   # torch.Size([4, 8, 64, 64])
 ```
 
+### Chunkwise parallel (faster on GPU, T ≥ 512)
+
+```python
+from kda import KDALayer
+
+layer = KDALayer(
+    hidden_dim=512, num_heads=8, head_dim=64,
+    use_chunk_parallel=True,   # WY + UT transform algorithm
+    chunk_size=64,
+)
+
+x = torch.randn(4, 512, 512)
+output, state = layer(x)
+```
+
+### MLA layer (full-attention complement)
+
+```python
+from kda import MLALayer
+
+mla = MLALayer(
+    hidden_dim=512,
+    num_heads=8,
+    head_dim=64,
+    kv_latent_dim=64,           # KV cache compressed to this size
+)
+
+x = torch.randn(4, 128, 512)
+output, c_kv = mla(x)          # c_kv: (4, 128, 64) — store this as KV cache
+print(f"KV cache compression: {mla.kv_cache_compression_ratio:.1f}x")
+
+# Generation: pass cached c_kv for subsequent tokens
+next_token = torch.randn(4, 1, 512)
+out_step, c_kv_new = mla(next_token, kv_cache=c_kv)
+```
+
+### 3:1 hybrid stack (KDA layers + 1 MLA every 4)
+
+```python
+import torch.nn as nn
+from kda import KDALayer, MLALayer
+
+class HybridBlock(nn.Module):
+    """3 KDA layers followed by 1 MLA — matches Kimi Linear deployment."""
+    def __init__(self, hidden_dim=512, num_heads=8, head_dim=64):
+        super().__init__()
+        self.kda_layers = nn.ModuleList([
+            KDALayer(hidden_dim, num_heads, head_dim) for _ in range(3)
+        ])
+        self.mla_layer = MLALayer(hidden_dim, num_heads, head_dim, kv_latent_dim=64)
+        self.norms = nn.ModuleList([nn.RMSNorm(hidden_dim) for _ in range(4)])
+
+    def forward(self, x, kda_states=None):
+        states = []
+        if kda_states is None:
+            kda_states = [None] * 3
+        for i, kda in enumerate(self.kda_layers):
+            out, s = kda(self.norms[i](x), state=kda_states[i])
+            x = x + out
+            states.append(s)
+        out_mla, c_kv = self.mla_layer(self.norms[3](x))
+        x = x + out_mla
+        return x, states, c_kv
+
+model = HybridBlock()
+x = torch.randn(2, 128, 512)
+out, kda_states, c_kv = model(x)
+```
+
 ### Stateful chunked inference
 
 ```python
+from kda import KDALayer
+
+layer = KDALayer(hidden_dim=512, num_heads=8, head_dim=64)
+
 # Process long sequence in chunks — state carries context across boundaries
 state = None
 for chunk in chunks:                 # each chunk: (B, chunk_len, D)
     output, state = layer(chunk, state=state)
 ```
 
+### vLLM-style inference adapter
+
+```python
+from kda import KDALayer, KDAVLLMAdapter
+
+kda_layer = KDALayer(hidden_dim=512, num_heads=8, head_dim=64)
+adapter = KDAVLLMAdapter(
+    kda_layer=kda_layer,
+    num_heads=8, key_dim=64, value_dim=64,
+    max_blocks=1024,
+)
+
+# Prefill (encode context)
+x_context = torch.randn(2, 256, 512)
+out, state = adapter.prefill(x_context, seq_ids=[0, 1])
+
+# Autoregressive decode (single token per step)
+for step in range(100):
+    x_token = torch.randn(2, 1, 512)
+    out, state = adapter.decode_step(x_token, seq_ids=[0, 1])
+
+adapter.free_sequence(0)
+adapter.free_sequence(1)
+```
+
+### Kernel dispatch (Triton when available)
+
+```python
+import torch
+from kda import chunk_kda_forward, fused_recurrent_kda_forward, HAS_TRITON
+
+print(f"Triton/FLA kernels active: {HAS_TRITON}")
+
+# (B, H, T, d) convention
+B, H, T, D = 2, 8, 128, 64
+q = torch.randn(B, H, T, D)
+k = torch.nn.functional.normalize(torch.randn(B, H, T, D), dim=-1)
+v = torch.randn(B, H, T, D)
+g = -torch.rand(B, H, T, 1) * 0.5   # log-space gate ≤ 0
+beta = torch.rand(B, H, T, 1) * 0.5 + 0.5
+
+# Chunkwise parallel (dispatches to Triton if FLA installed)
+out, final_state = chunk_kda_forward(q, k, v, g, beta, chunk_size=64)
+
+# Fused recurrent (optimal for T=1 decode steps)
+out_r, state_r = fused_recurrent_kda_forward(q[:, :, :1, :], k[:, :, :1, :],
+                                              v[:, :, :1, :], g[:, :, :1, :],
+                                              beta[:, :, :1, :])
+```
+
 ### Use individual components
 
 ```python
-from src.kda import FineGrainedGating, StateManager, DPLRTransition
+from kda import FineGrainedGating, StateManager, DPLRTransition
 
 gating = FineGrainedGating(hidden_dim=512, num_heads=8, head_dim=64)
 state_mgr = StateManager(key_dim=64, value_dim=64, num_heads=8, max_batch_size=32)
@@ -293,18 +428,19 @@ dplr = DPLRTransition(key_dim=64, value_dim=64, num_heads=8)
 
 x = torch.randn(4, 128, 512)
 gates, _ = gating(x)                 # (4, 128, 8, 64)
-
 state = state_mgr.initialize_state(batch_size=4)  # (4, 8, 64, 64)
 ```
 
 ### Disable architectural options (ablation)
 
 ```python
-# Without short conv (for sequential-chunk exact equivalence testing)
+from kda import KDALayer
+
+# Without short conv
 layer_no_conv = KDALayer(hidden_dim=512, num_heads=8, head_dim=64,
                          use_short_conv=False)
 
-# Without output gate (minimal KDA baseline)
+# Minimal baseline (no short conv, no output gate)
 layer_minimal = KDALayer(hidden_dim=512, num_heads=8, head_dim=64,
                          use_short_conv=False, use_output_gate=False)
 ```
@@ -436,13 +572,13 @@ gantt
 
 | Component | Version | Stability | Tests | Known Limitations |
 |-----------|---------|-----------|-------|-------------------|
-| `FineGrainedGating` | 1.0 | ✅ Stable | 9 | — |
+| `FineGrainedGating` | 1.0 | ✅ Stable | 9 | Low-rank factorisation fixes gate rank at init; no dynamic rank |
 | `DPLRTransition` | 1.0 | ✅ Stable | 9 | Eigen check is Gershgorin heuristic |
 | `StateManager` | 1.0 | ✅ Stable | 9 | Pre-alloc buffer requires max_batch_size at init |
 | `KDALayer` | 1.2 | ✅ Stable | 6 + 12 integration | Short conv needs chunk-carry for exact equivalence |
 | `ChunkwiseParallelKDA` | 1.0 | ✅ Stable | 11 | BT must be power-of-2; caller pads T |
 | WY representation | 1.0 | ✅ Stable | 5 (in chunk tests) | O(BT²) Python loop; Triton path via FLA |
-| UT transform | 1.0 | ✅ Stable | 3 (in chunk tests) | — |
+| UT transform | 1.0 | ✅ Stable | 3 (in chunk tests) | Rank-BT update grows memory linearly with chunk size |
 | `MLALayer` | 1.0 | ✅ Stable | 11 | Full causal attention; no sparse variant |
 | Triton/CUDA kernels | 1.0 | ✅ Stable | — | Dispatches to FLA when installed; PyTorch fallback |
 | `KDAVLLMAdapter` | 1.0 | ✅ Stable | 14 | vLLM not required; standalone mode supported |

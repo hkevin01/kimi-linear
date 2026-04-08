@@ -166,94 +166,67 @@ def _pytorch_chunk_kda(
     scale=None,
     return_intermediate_states=False,
 ):
-    """Pure-PyTorch fallback wrapping ChunkwiseParallelKDA."""
+    """
+    Pure-PyTorch token-loop fallback for environments without Triton/FLA.
+
+    Runs a sequential recurrent KDA update — correct for all input sizes; no
+    chunk-size divisibility requirement.
+
+    Inputs are in the chunk_kda_forward convention:
+      q, k, v : (B, H, T, d)
+      g       : (B, H, T, 1) — scalar log-space gate per head/token (≤ 0)
+      beta    : (B, H, T, 1) — delta-rule write rate ∈ (0, 1]
+    """
     # ─────────────────────────────────────────────────────────────────────────
     # ID:            KDA-TRITON-PY-001
-    # Requirement:   Provide numerically equivalent Python fallback for
-    #                environments without Triton installed.
+    # Requirement:   Produce identical output to the Triton path via O(T) loop.
+    # Rationale:     The Triton helpers (compute_wy_representation etc.) expect
+    #                per-channel gates and (B,H,BT,d) layout; this fallback uses
+    #                the scalar-gate convention directly to avoid layout mismatches.
     # ─────────────────────────────────────────────────────────────────────────
-    from .chunk_parallel import ChunkwiseParallelKDA  # avoid circular import
-
-    B, H, T, head_dim = q.shape
-    _, _, _, value_dim = v.shape
+    B, H, T, d_k = q.shape
+    d_v = v.shape[-1]
     device = q.device
     dtype = q.dtype
 
-    # Build a stateless instance (no learnable params used in functional call)
-    # or call functional helpers directly.
-    from .chunk_parallel import (
-        compute_wy_representation,
-        ut_transform_state_update,
-        compute_intra_chunk_output,
-    )
-
-    # Pad T to multiple of chunk_size
-    pad = (-T) % chunk_size
-    if pad > 0:
-        q = torch.nn.functional.pad(q, (0, 0, 0, pad))
-        k = torch.nn.functional.pad(k, (0, 0, 0, pad))
-        v = torch.nn.functional.pad(v, (0, 0, 0, pad))
-        g = torch.nn.functional.pad(g, (0, 0, 0, pad))
-        beta = torch.nn.functional.pad(beta, (0, 0, 0, pad), value=0.0)
-    T_pad = T + pad
-    num_chunks = T_pad // chunk_size
-
     if initial_state is None:
-        state = torch.zeros(B, H, head_dim, value_dim, device=device, dtype=dtype)
+        state = torch.zeros(B, H, d_k, d_v, device=device, dtype=dtype)
     else:
         state = initial_state.clone()
 
-    # Expand (B, H, T, d) → (B*H, T, d) for chunk helpers
-    def bh_merge(x):     return x.reshape(B * H, *x.shape[2:])
-    def bh_split(x):     return x.reshape(B, H, *x.shape[1:])
-
-    q_bh = bh_merge(q)
-    k_bh = bh_merge(k)
-    v_bh = bh_merge(v)
-    g_bh = bh_merge(g)
-    beta_bh = bh_merge(beta)
-    state_bh = bh_merge(state).unsqueeze(1)  # (B*H, 1, d_k, d_v)
-
     outputs = []
-    inter_states_list: list = [] if return_intermediate_states else []
+    inter_states_list: list = []
 
-    for ci in range(num_chunks):
-        s_idx = ci * chunk_size
-        e_idx = s_idx + chunk_size
+    for t in range(T):
+        g_t = g[:, :, t, 0].exp()              # (B, H) scalar decay per head
+        beta_t = beta[:, :, t, 0]              # (B, H) write rate
+        k_t = k[:, :, t, :]                    # (B, H, d_k)
+        v_t = v[:, :, t, :]                    # (B, H, d_v)
+        q_t = q[:, :, t, :]                    # (B, H, d_k)
 
-        q_c = q_bh[:, s_idx:e_idx, :]      # (B*H, BT, d)
-        k_c = k_bh[:, s_idx:e_idx, :]
-        v_c = v_bh[:, s_idx:e_idx, :]
-        g_c = g_bh[:, s_idx:e_idx, :]      # (B*H, BT, 1)
-        b_c = beta_bh[:, s_idx:e_idx, :]   # (B*H, BT, 1)
+        # Decay state: S_t = Diag(g_t) · S_{t-1}
+        state = state * g_t[..., None, None]   # (B, H, d_k, d_v)
 
-        w, y, g_cum, A = compute_wy_representation(k_c, v_c, g_c, b_c)
-        state_bh = ut_transform_state_update(state_bh, w, y, g_cum)
+        # Delta-rule update: S += β · k · (v − S^T k)^T
+        Sk = torch.einsum("bhkv,bhk->bhv", state, k_t)   # (B, H, d_v)
+        e_t = v_t - Sk                                     # (B, H, d_v)
+        state = state + beta_t[..., None, None] * torch.einsum(
+            "bhk,bhv->bhkv", k_t, e_t
+        )
+
+        # Retrieve: o_t = scale · S^T q_t
+        outputs.append(scale * torch.einsum("bhk,bhkv->bhv", q_t, state))  # (B,H,d_v)
 
         if return_intermediate_states:
-            inter_states_list.append(state_bh.clone())
+            inter_states_list.append(state.clone())
 
-        o_inter = torch.einsum("bk,bkv->bv",
-                               (q_c * (g_cum[:, -1:, :]).exp()).mean(-2),
-                               state_bh.squeeze(1)).unsqueeze(1).expand(-1, chunk_size, -1)
-        # Proper inter-chunk: broadcast across positions
-        q_g = q_c * g_cum.exp()  # (B*H, BT, d) — gated Q
-        o_inter = torch.einsum("btk,bkv->btv", q_g, state_bh.squeeze(1))
-
-        o_intra = compute_intra_chunk_output(q_c, k_c, g_c, y, scale=scale)
-
-        outputs.append(o_inter + o_intra)
-
-    out_bh = torch.cat(outputs, dim=1)[:, :T, :]  # trim padding
-    out = bh_split(out_bh)                          # (B, H, T, d_v)
-    final_state = bh_split(state_bh.squeeze(1))    # (B, H, d_k, d_v)
+    output = torch.stack(outputs, dim=2)   # (B, H, T, d_v)
 
     if return_intermediate_states:
-        # Stack: (B, H, num_chunks, d_k, d_v)
-        inter_np = torch.stack([bh_split(s.squeeze(1)) for s in inter_states_list], dim=2)
-        return out, final_state, inter_np
+        inter_states = torch.stack(inter_states_list, dim=2)  # (B, H, T, d_k, d_v)
+        return output, state, inter_states
 
-    return out, final_state
+    return output, state
 
 
 # ─────────────────────────────────────────────────────────────────────────────
