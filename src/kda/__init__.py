@@ -27,6 +27,9 @@ Example usage:
 from .gating import FineGrainedGating
 from .state_manager import StateManager
 from .dplr import DPLRTransition
+from .kda_layer import KDALayer
+
+__all__ = ["FineGrainedGating", "StateManager", "DPLRTransition", "KDALayer"]
 
 __all__ = [
     "FineGrainedGating",

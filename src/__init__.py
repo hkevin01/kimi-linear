@@ -8,13 +8,12 @@ hardware-efficient kernels and comprehensive benchmarking.
 __version__ = "0.1.0"
 __author__ = "Kimi Linear Optimization Team"
 
-from src.kda import KimiDeltaAttention
-from src.attention import LinearAttention, DeltaRule
-from src.models import KimiLinearModel
+from .kda import FineGrainedGating, StateManager, DPLRTransition
+from .kda.kda_layer import KDALayer
 
 __all__ = [
-    "KimiDeltaAttention",
-    "LinearAttention",
-    "DeltaRule", 
-    "KimiLinearModel",
+    "FineGrainedGating",
+    "StateManager",
+    "DPLRTransition",
+    "KDALayer",
 ]
