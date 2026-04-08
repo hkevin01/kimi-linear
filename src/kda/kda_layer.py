@@ -39,6 +39,7 @@ import torch.nn.functional as F
 from .gating import FineGrainedGating
 from .dplr import DPLRTransition
 from .state_manager import StateManager
+from .chunk_parallel import ChunkwiseParallelKDA
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +75,8 @@ class KDALayer(nn.Module):
         use_short_conv: bool = True,
         use_output_gate: bool = True,
         output_gate_rank: int = 0,  # 0 → hidden_dim // 4
+        use_chunk_parallel: bool = False,
+        chunk_size: int = 64,
     ) -> None:
         super().__init__()
 
@@ -91,6 +94,8 @@ class KDALayer(nn.Module):
         self.inner_dim = num_heads * head_dim
         self.use_short_conv = use_short_conv
         self.use_output_gate = use_output_gate
+        self.use_chunk_parallel = use_chunk_parallel
+        self.chunk_size = chunk_size
 
         # ── Projections ────────────────────────────────────────────────────
         self.q_proj = nn.Linear(hidden_dim, self.inner_dim, bias=False)
@@ -132,6 +137,17 @@ class KDALayer(nn.Module):
             num_heads=num_heads,
             max_batch_size=max_batch_size,
         )
+
+        # ── Chunkwise parallel engine (optional) ───────────────────────────
+        if use_chunk_parallel:
+            self.chunk_engine: Optional[ChunkwiseParallelKDA] = ChunkwiseParallelKDA(
+                key_dim=head_dim,
+                value_dim=head_dim,
+                num_heads=num_heads,
+                chunk_size=chunk_size,
+            )
+        else:
+            self.chunk_engine = None
 
         # ── Output normalisation (§3.2) ────────────────────────────────────
         self.out_norm = nn.RMSNorm(head_dim)
@@ -219,32 +235,58 @@ class KDALayer(nn.Module):
             else:
                 current_state = state.clone()
 
-            # ── Recurrent loop over T ──────────────────────────────────────
-            outputs = []
-            for t in range(T):
-                qt = Q[:, t, :, :]              # (B, H, K)
-                kt = K[:, t, :, :]              # (B, H, K)
-                vt = V[:, t, :, :]              # (B, H, V)
-                alpha_t = gates[:, t, :, :]     # (B, H, K)
-                beta_t = beta[:, t, :].unsqueeze(-1)  # (B, H, 1)
+            # ── Choose computation path ────────────────────────────────────
+            if self.use_chunk_parallel and self.chunk_engine is not None:
+                # ── Chunkwise parallel path ────────────────────────────────
+                # Pad T to multiple of chunk_size if necessary
+                pad = (-T) % self.chunk_size
+                if pad > 0:
+                    Q_in = F.pad(Q, (0, 0, 0, 0, 0, pad))
+                    K_in = F.pad(K, (0, 0, 0, 0, 0, pad))
+                    V_in = F.pad(V, (0, 0, 0, 0, 0, pad))
+                    gates_in = F.pad(gates, (0, 0, 0, 0, 0, pad))
+                    beta_in = F.pad(beta, (0, 0, 0, pad))
+                else:
+                    Q_in, K_in, V_in, gates_in, beta_in = Q, K, V, gates, beta
 
-                # DPLR state update: S_t = A_t S_{t-1} + β_t k_t v_t^T
-                new_state, _ = self.dplr.forward(
-                    current_state, kt, vt, alpha_t, beta_t
-                )
-                current_state = new_state
+                # Convert gates from linear-space to log-space for chunk engine
+                g_log = torch.log(gates_in.clamp(min=1e-8))  # (B, T_pad, H, K)
 
-                # Retrieve: o_t = S_t^T q_t  →  einsum (B,H,K,V) × (B,H,K) → (B,H,V)
-                ot = torch.einsum("bhkv,bhk->bhv", current_state, qt)  # (B, H, V)
+                out_hd, current_state = self.chunk_engine(
+                    Q_in, K_in, V_in, g_log, beta_in, state=current_state
+                )  # out_hd: (B, T_pad, H, V)
 
-                # RMSNorm per head
-                ot = self.out_norm(ot)
+                # Trim padding and reshape to (B, T, inner_dim)
+                out_hd = out_hd[:, :T, :, :]               # (B, T, H, V)
+                out = out_hd.reshape(B, T, self.inner_dim)
 
-                outputs.append(ot)
+            else:
+                # ── Recurrent loop over T ──────────────────────────────────
+                outputs = []
+                for t in range(T):
+                    qt = Q[:, t, :, :]              # (B, H, K)
+                    kt = K[:, t, :, :]              # (B, H, K)
+                    vt = V[:, t, :, :]              # (B, H, V)
+                    alpha_t = gates[:, t, :, :]     # (B, H, K)
+                    beta_t = beta[:, t, :].unsqueeze(-1)  # (B, H, 1)
 
-            # ── Stack all positions ────────────────────────────────────────
-            out = torch.stack(outputs, dim=1)   # (B, T, H, V)
-            out = out.reshape(B, T, self.inner_dim)
+                    # DPLR state update: S_t = A_t S_{t-1} + β_t k_t v_t^T
+                    new_state, _ = self.dplr.forward(
+                        current_state, kt, vt, alpha_t, beta_t
+                    )
+                    current_state = new_state
+
+                    # Retrieve: o_t = S_t^T q_t  →  einsum (B,H,K,V) × (B,H,K) → (B,H,V)
+                    ot = torch.einsum("bhkv,bhk->bhv", current_state, qt)  # (B, H, V)
+
+                    # RMSNorm per head
+                    ot = self.out_norm(ot)
+
+                    outputs.append(ot)
+
+                # ── Stack all positions ────────────────────────────────────
+                out = torch.stack(outputs, dim=1)   # (B, T, H, V)
+                out = out.reshape(B, T, self.inner_dim)
 
             # ── Output gate: σ(W_up W_down x) ⊙ out ──────────────────────
             if self.use_output_gate:

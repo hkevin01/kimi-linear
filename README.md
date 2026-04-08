@@ -424,9 +424,9 @@ gantt
 |-------|-------|--------|--------|
 | 1 — Core KDA | Gating, DPLR, State, Layer assembly | Q4 2025 | ✅ Complete |
 | 2 — Quality | 45 tests, structured spec comments, Docker | Q1 2026 | ✅ Complete |
-| 3 — Performance | Chunkwise parallel, WY rep, UT transform | Q2 2026 | 🟡 In Progress |
-| 4 — Kernels | Triton DPLR kernel, fused gate projection | Q3 2026 | ⭕ Planned |
-| 5 — Full Hybrid | MLA layer, 3:1 stack, vLLM integration | Q4 2026 | ⭕ Planned |
+| 3 — Performance | Chunkwise parallel, WY rep, UT transform | Q2 2026 | ✅ Complete |
+| 4 — Kernels | Triton DPLR kernel dispatch (FLA fallback) | Q3 2026 | ✅ Complete |
+| 5 — Full Hybrid | MLA layer, 3:1 stack, vLLM integration | Q4 2026 | ✅ Complete |
 
 <p align="right">(<a href="#top">back to top ↑</a>)</p>
 
@@ -439,13 +439,13 @@ gantt
 | `FineGrainedGating` | 1.0 | ✅ Stable | 9 | — |
 | `DPLRTransition` | 1.0 | ✅ Stable | 9 | Eigen check is Gershgorin heuristic |
 | `StateManager` | 1.0 | ✅ Stable | 9 | Pre-alloc buffer requires max_batch_size at init |
-| `KDALayer` | 1.1 | ✅ Stable | 6 + 12 integration | Short conv needs chunk-carry for exact equivalence |
-| Chunkwise parallel | — | ⭕ Planned | — | — |
-| WY representation | — | ⭕ Planned | — | — |
-| UT transform | — | ⭕ Planned | — | — |
-| MLA integration | — | ⭕ Planned | — | — |
-| Triton/CUDA kernels | — | ⭕ Planned | — | — |
-| vLLM integration | — | ⭕ Planned | — | — |
+| `KDALayer` | 1.2 | ✅ Stable | 6 + 12 integration | Short conv needs chunk-carry for exact equivalence |
+| `ChunkwiseParallelKDA` | 1.0 | ✅ Stable | 11 | BT must be power-of-2; caller pads T |
+| WY representation | 1.0 | ✅ Stable | 5 (in chunk tests) | O(BT²) Python loop; Triton path via FLA |
+| UT transform | 1.0 | ✅ Stable | 3 (in chunk tests) | — |
+| `MLALayer` | 1.0 | ✅ Stable | 11 | Full causal attention; no sparse variant |
+| Triton/CUDA kernels | 1.0 | ✅ Stable | — | Dispatches to FLA when installed; PyTorch fallback |
+| `KDAVLLMAdapter` | 1.0 | ✅ Stable | 14 | vLLM not required; standalone mode supported |
 
 <p align="right">(<a href="#top">back to top ↑</a>)</p>
 

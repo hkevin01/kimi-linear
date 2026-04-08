@@ -28,13 +28,23 @@ from .gating import FineGrainedGating
 from .state_manager import StateManager
 from .dplr import DPLRTransition
 from .kda_layer import KDALayer
-
-__all__ = ["FineGrainedGating", "StateManager", "DPLRTransition", "KDALayer"]
+from .chunk_parallel import ChunkwiseParallelKDA
+from .mla import MLALayer
+from .triton_kernels import chunk_kda_forward, fused_recurrent_kda_forward, HAS_TRITON
+from .vllm_integration import KDAVLLMAdapter, KDAStateBlockManager
 
 __all__ = [
     "FineGrainedGating",
     "StateManager",
     "DPLRTransition",
+    "KDALayer",
+    "ChunkwiseParallelKDA",
+    "MLALayer",
+    "chunk_kda_forward",
+    "fused_recurrent_kda_forward",
+    "HAS_TRITON",
+    "KDAVLLMAdapter",
+    "KDAStateBlockManager",
 ]
 
 __version__ = "0.1.0"
