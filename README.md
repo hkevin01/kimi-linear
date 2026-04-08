@@ -186,16 +186,166 @@ flowchart LR
 
 ## 🧰 Technology Stack
 
-| Technology | Purpose | Why Chosen | Alternatives Considered |
-|------------|---------|------------|------------------------|
-| Python 3.10+ | Implementation language | Pattern matching, type union syntax, widespread adoption | — |
-| PyTorch 2.6+ | Tensor ops, autograd, nn.Module | Native `nn.RMSNorm`, `einsum` JIT, CUDA integration | JAX, MLX |
-| `torch.einsum` | DPLR contractions | Readable, JIT-compilable, maps to cuBLAS | explicit matmul |
-| `nn.RMSNorm` | Output normalisation | Native in PyTorch 2.4+; no mean shift bias | LayerNorm |
-| `nn.Conv1d` (depthwise) | Short causal conv on K | Trivially causal via trim; grouped=inner_dim | custom CUDA conv |
-| Black | Code formatting | Zero-config deterministic formatting | autopep8, ruff |
-| pytest 9.x | Test runner | Rich fixtures, parameterize, --tb=short | unittest |
-| Docker | Dev/prod environments | Reproducible CUDA environment | conda, venv-only |
+Each technology in this project was chosen deliberately. This section explains what each one is, what it does inside kimi-linear, and why it was selected over the alternatives.
+
+---
+
+### 🔥 Triton / CUDA Kernels (`src/kda/triton_kernels.py`)
+
+**What they are.**
+Triton is an open-source GPU programming language and compiler developed by OpenAI. It lets you write GPU kernels in Python-like syntax that compile down to PTX (the NVIDIA GPU instruction set), achieving performance close to hand-written CUDA without requiring C++ expertise. CUDA kernels are the lower-level equivalent — raw C++ functions that run in parallel across thousands of GPU threads.
+
+**What they do here.**
+The `triton_kernels.py` module acts as a dispatch layer. When [flash-linear-attention (FLA)](https://github.com/fla-org/flash-linear-attention) is installed, `chunk_kda_forward` and `fused_recurrent_kda_forward` automatically route to FLA's production Triton kernels (`fla.ops.kda.chunk_kda`, `fla.ops.kda.fused_recurrent_kda`). These kernels:
+
+- Fuse the WY representation, UT-transform state update, and intra-chunk attention into a **single GPU kernel launch** — eliminating the Python loop overhead and the intermediate tensor allocations that the pure-PyTorch path incurs.
+- Use **shared memory tiling** to keep frequently-reused data (keys, gates, the running state) on-chip rather than round-tripping through HBM (GPU RAM), which is the dominant bottleneck at the sizes used in practice.
+- Support **bfloat16 and float16** with fused operations that reduce the number of memory reads/writes by keeping intermediate results in registers.
+
+When FLA is not installed (CPU-only machine, no CUDA, CI environment), the module falls back transparently to the pure-PyTorch token loop — correct output, just slower.
+
+**Why Triton over alternatives.**
+
+| Option | Problem |
+|--------|---------|
+| Pure PyTorch (eager) | O(T) Python loop; each step materialises intermediate tensors; ~10–50× slower than fused kernel at T=2048 |
+| `torch.compile` + eager | Reduces overhead but cannot tile across the recurrent state dimension; still memory-bandwidth-bound |
+| Hand-written CUDA | Correct but requires C++ build toolchain, CUDA SDK, and per-architecture tuning; maintenance burden is high |
+| Triton via FLA | Python-authored, auto-tuned launch configs, works on any sm70+ GPU (V100, A100, H100), active maintenance from fla-org |
+
+The dispatch pattern — try FLA, fall back to PyTorch — means the codebase works on a laptop CPU for development and gets production speed on a GPU cluster without code changes.
+
+---
+
+### 🔢 PyTorch 2.6+ (`torch`)
+
+**What it is.**
+PyTorch is the dominant deep-learning framework for research and production. It provides n-dimensional tensor arithmetic, automatic differentiation (`autograd`), GPU memory management, and a large ecosystem of pre-built layers (`nn.Module`).
+
+**What it does here.**
+Every layer — `KDALayer`, `MLALayer`, `ChunkwiseParallelKDA`, `KDAVLLMAdapter` — is a `torch.nn.Module`. The recurrent state is a plain `torch.Tensor`. Einsum contractions (`torch.einsum`) express the DPLR and WY update equations in a form that is both readable and JIT-compilable. `F.scaled_dot_product_attention` in `MLALayer` automatically dispatches to Flash Attention 2 when available.
+
+**Why PyTorch over alternatives.**
+
+| Option | Problem |
+|--------|---------|
+| JAX | Functional-only style conflicts with the stateful recurrence design; smaller ecosystem for model serving |
+| MLX (Apple) | CUDA support is a first-class requirement; MLX targets Apple Silicon |
+| TensorFlow 2 | Less expressive dynamic graph for research; declining community adoption |
+
+PyTorch 2.6 specifically added stable `nn.RMSNorm` (used in our output normalisation) and improved `torch.compile` support, which motivated the ≥ 2.6 minimum.
+
+---
+
+### 📐 `torch.einsum`
+
+**What it is.**
+`torch.einsum` evaluates Einstein-summation expressions — a compact notation for tensor contractions where repeated indices are summed over.
+
+**What it does here.**
+The two hottest operations in KDA — the DPLR state update and the WY rank-BT correction — are expressed as einsums:
+
+```python
+# Outer product write: k (B,H,K) × e (B,H,V) → delta_S (B,H,K,V)
+state += beta * torch.einsum("bhk,bhv->bhkv", k_t, e_t)
+
+# Query retrieval: S (B,H,K,V) × q (B,H,K) → output (B,H,V)
+o_t = torch.einsum("bhkv,bhk->bhv", state, q_t)
+
+# UT rank-BT correction: w (B,H,BT,K) × y (B,H,BT,V) → (B,H,K,V)
+delta = torch.einsum("bhtk,bhtv->bhkv", w, y)
+```
+
+**Why `einsum` over explicit matmul/bmm.**
+Einsum expressions map directly to cuBLAS/cuBLASLt GEMM calls after PyTorch's contraction optimiser selects the best pairwise contraction order. Explicit `matmul` would require manual reshapes and transposes that obscure the mathematical intent. The trade-off is that `einsum` is slightly harder to read at first but much easier to verify against the paper equations.
+
+---
+
+### 📏 `nn.RMSNorm`
+
+**What it is.**
+Root Mean Square Layer Normalisation normalises activations by dividing by their RMS rather than subtracting the mean and dividing by the full standard deviation (as LayerNorm does).
+
+$$\text{RMSNorm}(x) = \frac{x}{\sqrt{\frac{1}{d}\sum_i x_i^2 + \varepsilon}} \cdot \gamma$$
+
+**What it does here.**
+Applied per-head to the retrieved content vector `o_t = S_t^T q_t` before the output gate. Without this, the retrieved vector's magnitude grows unboundedly as the state `S_t` accumulates outer products — causing the output gate to saturate and gradients to vanish.
+
+**Why RMSNorm over LayerNorm.**
+RMSNorm omits the mean-subtraction step. Empirically (Zhang & Sennrich 2019; used in LLaMA, Mistral, Kimi Linear) this has equal or better training stability at ~10% lower compute cost. `nn.RMSNorm` is native in PyTorch ≥ 2.4, removing the need for a custom kernel.
+
+---
+
+### 🌀 Depthwise `nn.Conv1d` (short convolution on keys)
+
+**What it is.**
+A depthwise (grouped) 1-D convolution where each channel is filtered independently — `groups=C` means zero cross-channel mixing. Kernel size 4 with causal (left) padding injects a 4-token receptive field.
+
+**What it does here.**
+Applied to the key projection before L2-normalisation (§3.1 of arXiv:2510.26692):
+
+```python
+K = self.k_conv(K.transpose(1, 2)).narrow(2, 0, T).transpose(1, 2)
+K = F.silu(K)
+```
+
+The convolution gives each key a 4-step local context window — nearby tokens can influence what gets written into the state — without breaking the O(1) recurrent complexity because the final key at each step is still a single vector.
+
+**Why depthwise Conv1d over alternatives.**
+A full (non-depthwise) convolution would mix key channels and increase parameters by a factor of `inner_dim`. A self-attention local window would reintroduce quadratic complexity for the conv pass. Depthwise Conv1d is O(T·C·kernel) — essentially free — and adds exactly the right amount of local context per the paper specification.
+
+---
+
+### 🐍 Python 3.10+
+
+**What it provides here.**
+- `match`/`case` structural pattern matching for clean dispatch in state management error handling.
+- `X | Y` union type syntax in annotations (`Optional[Tensor]` → `Tensor | None`).
+- `__future__.annotations` deferred evaluation, enabling forward references without quotes.
+
+**Why 3.10 minimum over 3.8/3.9.**
+`nn.RMSNorm` requires PyTorch 2.4, which dropped 3.8 support. Pattern matching and the union syntax materially improve code readability in the dispatch and error-handling paths. 3.10 is the oldest version still receiving security patches at the time of writing.
+
+---
+
+### 🧪 pytest 9.x
+
+**What it is.**
+pytest is a Python testing framework that discovers and runs test functions/classes, provides rich assertion introspection, and supports fixtures, parametrize, and plugins.
+
+**What it does here.**
+130 tests across 8 files verify shape contracts, numerical correctness (no NaN/Inf), gradient flow, stateful continuity, error raising, and physics (gate decay suppresses old state). Fixtures (`@pytest.fixture`) provide reusable layer instances without duplicating setup code. `--tb=short` gives compact failure output in CI.
+
+**Why pytest over `unittest`.**
+`unittest` requires wrapping everything in classes that inherit `TestCase` and uses `self.assertEqual` style assertions. pytest uses bare `assert` statements, infers test discovery automatically, and its failure messages show the actual vs. expected values without any extra boilerplate.
+
+---
+
+### 🐋 Docker (`docker/Dockerfile`, `docker/Dockerfile.dev`)
+
+**What it is.**
+Docker packages an application and its entire runtime environment (OS libraries, CUDA runtime, Python, pip dependencies) into a portable container image that runs identically on any Linux host with a Docker daemon.
+
+**What it does here.**
+- `Dockerfile.dev` mounts the source directory at runtime (`-v $(pwd):/workspace`) so code edits are reflected immediately without rebuilding — fast iteration during development.
+- `Dockerfile` (production) bakes the source in at build time, producing a self-contained image suitable for deployment on Kubernetes, RunPod, or any container orchestration platform.
+- Both images pin the CUDA runtime version, eliminating the "works on my machine" class of GPU driver mismatches.
+
+**Why Docker over conda/venv-only.**
+A bare `venv` does not capture system libraries (CUDA runtime, libcudnn, NCCL). conda captures more but is slower to resolve and not the standard in production serving. Docker produces an immutable, reproducible artefact that can be pushed to a registry and deployed without any environment setup on the target machine.
+
+---
+
+### ⚡ FLA — flash-linear-attention (`[fla]` optional extra)
+
+**What it is.**
+[flash-linear-attention](https://github.com/fla-org/flash-linear-attention) is the official reference implementation of KDA (and other linear attention variants) by the Moonshot/FLA team. It provides hand-optimised Triton kernels for the KDA chunk forward/backward passes.
+
+**What it does here.**
+When installed, `HAS_TRITON` becomes `True` and `chunk_kda_forward` routes to `fla.ops.kda.chunk_kda` — the same kernel that powers the production Kimi Linear model. This is the fastest available path on CUDA hardware.
+
+**Why optional.**
+Most development and CI runs happen on CPU or without the FLA package. Making it optional means the package installs cleanly on any machine (`pip install kimi-linear`) and degrades gracefully to the pure-PyTorch path — no broken import, no missing `.so` files.
 
 <p align="right">(<a href="#top">back to top ↑</a>)</p>
 
