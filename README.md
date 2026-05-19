@@ -60,16 +60,16 @@ The hybrid deployment stacks **three KDA layers for every one full MLA (Multi-He
 
 ## ✨ Key Features
 
-| Icon | Feature | Description | Impact | Status |
+| <sub>Icon</sub> | <sub>Feature</sub> | <sub>Description</sub> | <sub>Impact</sub> | <sub>Status</sub> |
 |------|---------|-------------|--------|--------|
-| 🎛️ | Fine-Grained Gating | Per-channel $\alpha_t \in (0,1)^{d_k}$ via low-rank linear bottleneck | Selective memory control | ✅ Stable |
-| 🔄 | DPLR Transition | Two-step diagonal + rank-1 correction; O(K·V) not O(K²·V) | 2× faster than general DPLR | ✅ Stable |
-| 🧠 | State Management | Constant-memory RNN state with checkpointing and NaN guards | O(1) per-token memory | ✅ Stable |
-| 🔬 | Short Conv on K | Depthwise causal conv (kernel=4) on key projection (§3.1) | Local context in keys | ✅ Stable |
-| 📐 | RMSNorm Output | Per-head RMSNorm on retrieved content before output gate | Numerical stability | ✅ Stable |
-| 🚪 | Output Gate | Low-rank sigmoid gate $\sigma(W_\text{up}W_\text{down}x) \odot \text{norm}(o_t)$ (§3.2) | Expressiveness | ✅ Stable |
-| 🔢 | Mixed Precision | FP32 / FP16 / BF16 via PyTorch dtype | Flexibility | ✅ Stable |
-| 🧪 | Test Suite | 45 unit + integration tests across all components | Coverage | ✅ Stable |
+| <sub>🎛️</sub> | <sub>Fine-Grained Gating</sub> | <sub>Per-channel $\alpha_t \in (0,1)^{d_k}$ via low-rank linear bottleneck</sub> | <sub>Selective memory control</sub> | <sub>✅ Stable</sub> |
+| <sub>🔄</sub> | <sub>DPLR Transition</sub> | <sub>Two-step diagonal + rank-1 correction; O(K·V) not O(K²·V)</sub> | <sub>2× faster than general DPLR</sub> | <sub>✅ Stable</sub> |
+| <sub>🧠</sub> | <sub>State Management</sub> | <sub>Constant-memory RNN state with checkpointing and NaN guards</sub> | <sub>O(1) per-token memory</sub> | <sub>✅ Stable</sub> |
+| <sub>🔬</sub> | <sub>Short Conv on K</sub> | <sub>Depthwise causal conv (kernel=4) on key projection (§3.1)</sub> | <sub>Local context in keys</sub> | <sub>✅ Stable</sub> |
+| <sub>📐</sub> | <sub>RMSNorm Output</sub> | <sub>Per-head RMSNorm on retrieved content before output gate</sub> | <sub>Numerical stability</sub> | <sub>✅ Stable</sub> |
+| <sub>🚪</sub> | <sub>Output Gate</sub> | <sub>Low-rank sigmoid gate $\sigma(W_\text{up}W_\text{down}x) \odot \text{norm}(o_t)$ (§3.2)</sub> | <sub>Expressiveness</sub> | <sub>✅ Stable</sub> |
+| <sub>🔢</sub> | <sub>Mixed Precision</sub> | <sub>FP32 / FP16 / BF16 via PyTorch dtype</sub> | <sub>Flexibility</sub> | <sub>✅ Stable</sub> |
+| <sub>🧪</sub> | <sub>Test Suite</sub> | <sub>45 unit + integration tests across all components</sub> | <sub>Coverage</sub> | <sub>✅ Stable</sub> |
 
 **Performance from original paper (at 1M-token context):**
 
@@ -173,12 +173,12 @@ flowchart LR
 
 ### Component Responsibilities
 
-| Component | File | Purpose | Time | Space |
+| <sub>Component</sub> | <sub>File</sub> | <sub>Purpose</sub> | <sub>Time</sub> | <sub>Space</sub> |
 |-----------|------|---------|------|-------|
-| `FineGrainedGating` | `src/kda/gating.py` | Per-channel α_t via W_down/W_up + sigmoid | O(B·T·D·rank) | O(D·rank) |
-| `DPLRTransition` | `src/kda/dplr.py` | Two-step state transition; Gershgorin stability check | O(B·H·K·V) | O(B·H·K·V) |
-| `StateManager` | `src/kda/state_manager.py` | S_t lifecycle: init, update, checkpoint, OOM guard | O(B·H·K·V) | O(B·H·K·V) |
-| `KDALayer` | `src/kda/kda_layer.py` | Full KDA forward: projections → conv → gate → DPLR → norm → gate → out | O(B·T·H·K·V) | O(B·H·K·V) |
+| <sub>`FineGrainedGating`</sub> | <sub>`src/kda/gating.py`</sub> | <sub>Per-channel α_t via W_down/W_up + sigmoid</sub> | <sub>O(B·T·D·rank)</sub> | <sub>O(D·rank)</sub> |
+| <sub>`DPLRTransition`</sub> | <sub>`src/kda/dplr.py`</sub> | <sub>Two-step state transition; Gershgorin stability check</sub> | <sub>O(B·H·K·V)</sub> | <sub>O(B·H·K·V)</sub> |
+| <sub>`StateManager`</sub> | <sub>`src/kda/state_manager.py`</sub> | <sub>S_t lifecycle: init, update, checkpoint, OOM guard</sub> | <sub>O(B·H·K·V)</sub> | <sub>O(B·H·K·V)</sub> |
+| <sub>`KDALayer`</sub> | <sub>`src/kda/kda_layer.py`</sub> | <sub>Full KDA forward: projections → conv → gate → DPLR → norm → gate → out</sub> | <sub>O(B·T·H·K·V)</sub> | <sub>O(B·H·K·V)</sub> |
 
 <p align="right">(<a href="#top">back to top ↑</a>)</p>
 
@@ -206,12 +206,12 @@ When FLA is not installed (CPU-only machine, no CUDA, CI environment), the modul
 
 **Why Triton over alternatives.**
 
-| Option | Problem |
+| <sub>Option</sub> | <sub>Problem</sub> |
 |--------|---------|
-| Pure PyTorch (eager) | O(T) Python loop; each step materialises intermediate tensors; ~10–50× slower than fused kernel at T=2048 |
-| `torch.compile` + eager | Reduces overhead but cannot tile across the recurrent state dimension; still memory-bandwidth-bound |
-| Hand-written CUDA | Correct but requires C++ build toolchain, CUDA SDK, and per-architecture tuning; maintenance burden is high |
-| Triton via FLA | Python-authored, auto-tuned launch configs, works on any sm70+ GPU (V100, A100, H100), active maintenance from fla-org |
+| <sub>Pure PyTorch (eager)</sub> | <sub>O(T) Python loop; each step materialises intermediate tensors; ~10–50× slower than fused kernel at T=2048</sub> |
+| <sub>`torch.compile` + eager</sub> | <sub>Reduces overhead but cannot tile across the recurrent state dimension; still memory-bandwidth-bound</sub> |
+| <sub>Hand-written CUDA</sub> | <sub>Correct but requires C++ build toolchain, CUDA SDK, and per-architecture tuning; maintenance burden is high</sub> |
+| <sub>Triton via FLA</sub> | <sub>Python-authored, auto-tuned launch configs, works on any sm70+ GPU (V100, A100, H100), active maintenance from fla-org</sub> |
 
 The dispatch pattern — try FLA, fall back to PyTorch — means the codebase works on a laptop CPU for development and gets production speed on a GPU cluster without code changes.
 
@@ -227,11 +227,11 @@ Every layer — `KDALayer`, `MLALayer`, `ChunkwiseParallelKDA`, `KDAVLLMAdapter`
 
 **Why PyTorch over alternatives.**
 
-| Option | Problem |
+| <sub>Option</sub> | <sub>Problem</sub> |
 |--------|---------|
-| JAX | Functional-only style conflicts with the stateful recurrence design; smaller ecosystem for model serving |
-| MLX (Apple) | CUDA support is a first-class requirement; MLX targets Apple Silicon |
-| TensorFlow 2 | Less expressive dynamic graph for research; declining community adoption |
+| <sub>JAX</sub> | <sub>Functional-only style conflicts with the stateful recurrence design; smaller ecosystem for model serving</sub> |
+| <sub>MLX (Apple)</sub> | <sub>CUDA support is a first-class requirement; MLX targets Apple Silicon</sub> |
+| <sub>TensorFlow 2</sub> | <sub>Less expressive dynamic graph for research; declining community adoption</sub> |
 
 PyTorch 2.6 specifically added stable `nn.RMSNorm` (used in our output normalisation) and improved `torch.compile` support, which motivated the ≥ 2.6 minimum.
 
@@ -706,13 +706,13 @@ gantt
         vLLM / SGLang Plugin      :         i2, 2026-09-01, 2026-12-01
 ```
 
-| Phase | Goals | Target | Status |
+| <sub>Phase</sub> | <sub>Goals</sub> | <sub>Target</sub> | <sub>Status</sub> |
 |-------|-------|--------|--------|
-| 1 — Core KDA | Gating, DPLR, State, Layer assembly | Q4 2025 | ✅ Complete |
-| 2 — Quality | 45 tests, structured spec comments, Docker | Q1 2026 | ✅ Complete |
-| 3 — Performance | Chunkwise parallel, WY rep, UT transform | Q2 2026 | ✅ Complete |
-| 4 — Kernels | Triton DPLR kernel dispatch (FLA fallback) | Q3 2026 | ✅ Complete |
-| 5 — Full Hybrid | MLA layer, 3:1 stack, vLLM integration | Q4 2026 | ✅ Complete |
+| <sub>1 — Core KDA</sub> | <sub>Gating, DPLR, State, Layer assembly</sub> | <sub>Q4 2025</sub> | <sub>✅ Complete</sub> |
+| <sub>2 — Quality</sub> | <sub>45 tests, structured spec comments, Docker</sub> | <sub>Q1 2026</sub> | <sub>✅ Complete</sub> |
+| <sub>3 — Performance</sub> | <sub>Chunkwise parallel, WY rep, UT transform</sub> | <sub>Q2 2026</sub> | <sub>✅ Complete</sub> |
+| <sub>4 — Kernels</sub> | <sub>Triton DPLR kernel dispatch (FLA fallback)</sub> | <sub>Q3 2026</sub> | <sub>✅ Complete</sub> |
+| <sub>5 — Full Hybrid</sub> | <sub>MLA layer, 3:1 stack, vLLM integration</sub> | <sub>Q4 2026</sub> | <sub>✅ Complete</sub> |
 
 <p align="right">(<a href="#top">back to top ↑</a>)</p>
 
@@ -720,18 +720,18 @@ gantt
 
 ## 📋 Implementation Status
 
-| Component | Version | Stability | Tests | Known Limitations |
+| <sub>Component</sub> | <sub>Version</sub> | <sub>Stability</sub> | <sub>Tests</sub> | <sub>Known Limitations</sub> |
 |-----------|---------|-----------|-------|-------------------|
-| `FineGrainedGating` | 1.0 | ✅ Stable | 9 | Low-rank factorisation fixes gate rank at init; no dynamic rank |
-| `DPLRTransition` | 1.0 | ✅ Stable | 9 | Eigen check is Gershgorin heuristic |
-| `StateManager` | 1.0 | ✅ Stable | 9 | Pre-alloc buffer requires max_batch_size at init |
-| `KDALayer` | 1.2 | ✅ Stable | 6 + 12 integration | Short conv needs chunk-carry for exact equivalence |
-| `ChunkwiseParallelKDA` | 1.0 | ✅ Stable | 11 | BT must be power-of-2; caller pads T |
-| WY representation | 1.0 | ✅ Stable | 5 (in chunk tests) | O(BT²) Python loop; Triton path via FLA |
-| UT transform | 1.0 | ✅ Stable | 3 (in chunk tests) | Rank-BT update grows memory linearly with chunk size |
-| `MLALayer` | 1.0 | ✅ Stable | 11 | Full causal attention; no sparse variant |
-| Triton/CUDA kernels | 1.0 | ✅ Stable | — | Dispatches to FLA when installed; PyTorch fallback |
-| `KDAVLLMAdapter` | 1.0 | ✅ Stable | 14 | vLLM not required; standalone mode supported |
+| <sub>`FineGrainedGating`</sub> | <sub>1.0</sub> | <sub>✅ Stable</sub> | <sub>9</sub> | <sub>Low-rank factorisation fixes gate rank at init; no dynamic rank</sub> |
+| <sub>`DPLRTransition`</sub> | <sub>1.0</sub> | <sub>✅ Stable</sub> | <sub>9</sub> | <sub>Eigen check is Gershgorin heuristic</sub> |
+| <sub>`StateManager`</sub> | <sub>1.0</sub> | <sub>✅ Stable</sub> | <sub>9</sub> | <sub>Pre-alloc buffer requires max_batch_size at init</sub> |
+| <sub>`KDALayer`</sub> | <sub>1.2</sub> | <sub>✅ Stable</sub> | <sub>6 + 12 integration</sub> | <sub>Short conv needs chunk-carry for exact equivalence</sub> |
+| <sub>`ChunkwiseParallelKDA`</sub> | <sub>1.0</sub> | <sub>✅ Stable</sub> | <sub>11</sub> | <sub>BT must be power-of-2; caller pads T</sub> |
+| <sub>WY representation</sub> | <sub>1.0</sub> | <sub>✅ Stable</sub> | <sub>5 (in chunk tests)</sub> | <sub>O(BT²) Python loop; Triton path via FLA</sub> |
+| <sub>UT transform</sub> | <sub>1.0</sub> | <sub>✅ Stable</sub> | <sub>3 (in chunk tests)</sub> | <sub>Rank-BT update grows memory linearly with chunk size</sub> |
+| <sub>`MLALayer`</sub> | <sub>1.0</sub> | <sub>✅ Stable</sub> | <sub>11</sub> | <sub>Full causal attention; no sparse variant</sub> |
+| <sub>Triton/CUDA kernels</sub> | <sub>1.0</sub> | <sub>✅ Stable</sub> | <sub>—</sub> | <sub>Dispatches to FLA when installed; PyTorch fallback</sub> |
+| <sub>`KDAVLLMAdapter`</sub> | <sub>1.0</sub> | <sub>✅ Stable</sub> | <sub>14</sub> | <sub>vLLM not required; standalone mode supported</sub> |
 
 <p align="right">(<a href="#top">back to top ↑</a>)</p>
 
