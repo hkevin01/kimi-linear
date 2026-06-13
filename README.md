@@ -615,10 +615,10 @@ flowchart LR
     DW --> SL(["SiLU"])
     SL --> UP(["W_up\nrank → H·K"])
     UP --> SG(["sigmoid"])
-    SG --> AL([["α_t ∈ (0,1)^(H×K)\nper-channel gate"]])
-    AL --> D1[["α[0] controls dim 0\nof state S"]]
-    AL --> D2[["α[k] controls dim k\nof state S"]]
-    AL --> DN[["α[K-1] controls\nlast dim of S"]]
+    SG --> AL(["alpha per-channel gate\nshape H x K"])
+    AL --> D1(["alpha_0 controls\ndim 0 of state S"])
+    AL --> D2(["alpha_k controls\ndim k of state S"])
+    AL --> DN(["alpha_K-1 controls\nlast dim of S"])
     style AL fill:#4a90d9,color:#fff
     style SG fill:#5cb85c,color:#fff
 ```
@@ -681,16 +681,16 @@ The RMSNorm prevents magnitude explosion across deep stacks, while the output ga
 ```mermaid
 flowchart LR
     subgraph Standard MHA
-        XA(["x  B×D"]) --> KA(["W_K\nD→H·d_k"])
-        XA --> VA(["W_V\nD→H·d_v"])
-        KA --> KCHA(["KV Cache\nT × H × (d_k+d_v)"])
+        XA(["x  BxD"]) --> KA(["W_K\nD to H x d_k"])
+        XA --> VA(["W_V\nD to H x d_v"])
+        KA --> KCHA(["KV Cache\nT x H x d_k+d_v"])
         VA --> KCHA
     end
     subgraph MLA
-        XB(["x  B×D"]) --> DW(["W_down\nD → d_c"])
-        DW --> CKV([["𝑐_KV\nT × d_c  \u2190 only this cached"]])
-        CKV --> KUP(["W_up_K\nd_c → H·d_k"])
-        CKV --> VUP(["W_up_V\nd_c → H·d_v"])
+        XB(["x  BxD"]) --> DW(["W_down\nD to d_c"])
+        DW --> CKV(["c_KV cached only\nT x d_c"])
+        CKV --> KUP(["W_up_K\nd_c to H x d_k"])
+        CKV --> VUP(["W_up_V\nd_c to H x d_v"])
     end
     style CKV fill:#4a90d9,color:#fff
     style KCHA fill:#ee4c2c,color:#fff
