@@ -609,6 +609,23 @@ $$\alpha_t = \sigma\!\left(W_\text{up}\, \text{SiLU}(W_\text{down}\, x_t)\right)
 
 This gives the model fine-grained control over which memory dimensions to retain or decay at each step — comparable expressiveness to full attention's content-adaptive routing at O(1) state cost.
 
+```mermaid
+flowchart LR
+    X(["x_t  B×D"]) --> DW(["W_down\nD → rank"])
+    DW --> SL(["SiLU"])
+    SL --> UP(["W_up\nrank → H·K"])
+    UP --> SG(["sigmoid"])
+    SG --> AL([["α_t ∈ (0,1)^(H×K)\nper-channel gate"]])
+    AL --> D1[["α[0] controls dim 0\nof state S"]]
+    AL --> D2[["α[k] controls dim k\nof state S"]]
+    AL --> DN[["α[K-1] controls\nlast dim of S"]]
+    style AL fill:#4a90d9,color:#fff
+    style SG fill:#5cb85c,color:#fff
+```
+
+> **Scalar gate** (traditional): one number per head — all K memory dimensions forget at the same rate.  
+> **Vector gate** (KDA): K numbers per head — each memory dimension has its own independent decay rate.
+
 ### 🔄 Constrained DPLR Transition
 
 The general DPLR update requires O(K²·V) operations. KDA exploits the structural constraint $a_t = \beta_t k_t$, $b_t = k_t \odot \alpha_t$ to reduce this to **O(K·V)**:
@@ -620,6 +637,19 @@ Step 3: S  = S  + β_t · k_t · v_t⊤        ← outer product write
 ```
 
 A Gershgorin spectral radius estimate is computed each forward pass to warn when the transition matrix approaches instability ($\rho > 1.1$).
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> S_prev : initial state S_0 = 0
+    S_prev --> Decay : Step 1\nDiag(α_t) · S
+    Decay --> DeltaCorrect : Step 2\nremove old k contribution
+    DeltaCorrect --> KVWrite : Step 3\nwrite new k⊗v
+    KVWrite --> S_next : updated state S_t
+    S_next --> S_prev : next token
+    S_next --> Retrieve : query\no_t = S_t\u1d40 q_t
+    Retrieve --> [*] : output
+```
 
 ### 📡 Short Convolution on Keys (§3.1)
 
@@ -643,6 +673,30 @@ After retrieval $o_t = S_t^\top q_t$, the output is normalised and gated:
 $$y_t = \sigma\!\left(W_\text{up}\, W_\text{down}\, x_t\right) \odot \text{RMSNorm}(o_t)$$
 
 The RMSNorm prevents magnitude explosion across deep stacks, while the output gate adds expressiveness without extra state cost.
+
+### 🗜️ MLA KV-Cache Compression
+
+`MLALayer` compresses keys and values through a shared low-rank bottleneck before writing to the KV cache, achieving up to **16×** cache reduction.
+
+```mermaid
+flowchart LR
+    subgraph Standard MHA
+        XA(["x  B×D"]) --> KA(["W_K\nD→H·d_k"])
+        XA --> VA(["W_V\nD→H·d_v"])
+        KA --> KCHA(["KV Cache\nT × H × (d_k+d_v)"])
+        VA --> KCHA
+    end
+    subgraph MLA
+        XB(["x  B×D"]) --> DW(["W_down\nD → d_c"])
+        DW --> CKV([["𝑐_KV\nT × d_c  \u2190 only this cached"]])
+        CKV --> KUP(["W_up_K\nd_c → H·d_k"])
+        CKV --> VUP(["W_up_V\nd_c → H·d_v"])
+    end
+    style CKV fill:#4a90d9,color:#fff
+    style KCHA fill:#ee4c2c,color:#fff
+```
+
+> Cache stores `c_KV` of size `T × d_c` instead of `T × H × (d_k + d_v)`. With `d_c=64`, `H=8`, `d=64` that is a **16× reduction** per layer.
 
 <p align="right">(<a href="#top">back to top ↑</a>)</p>
 
@@ -672,12 +726,35 @@ pytest tests/kda/test_integration.py -v
 **Test distribution:**
 
 ```mermaid
-pie title Test Coverage by Module
+pie title Test Coverage by Module (130 total)
     "test_gating.py" : 9
     "test_dplr.py" : 9
     "test_state_manager.py" : 9
     "test_kda_layer.py" : 6
     "test_integration.py" : 12
+    "test_chunk_parallel.py" : 19
+    "test_mla.py" : 11
+    "test_triton_kernels.py" : 27
+    "test_vllm_integration.py" : 28
+```
+
+**Inference mode comparison:**
+
+```mermaid
+flowchart TD
+    START(["Inference request"]) --> Q1{Sequence\nlength?}
+    Q1 -- "T = 1\n(decode step)" --> REC(["fused_recurrent_kda_forward\nO(1) per token"])
+    Q1 -- "T < 512\n(short prefill)" --> LOOP(["KDALayer token loop\nO(T) sequential"])
+    Q1 -- "T >= 512\n(long prefill)" --> Q2{FLA\ninstalled?}
+    Q2 -- Yes --> TRITON(["chunk_kda_forward\nTriton kernel  \u26a1"])
+    Q2 -- No --> CHUNK(["ChunkwiseParallelKDA\nPyTorch chunks"])
+    REC --> OUT(["output + state"])
+    LOOP --> OUT
+    TRITON --> OUT
+    CHUNK --> OUT
+    style TRITON fill:#76b900,color:#fff
+    style REC fill:#4a90d9,color:#fff
+    style OUT fill:#555,color:#fff
 ```
 
 <p align="right">(<a href="#top">back to top ↑</a>)</p>
@@ -719,6 +796,25 @@ gantt
 ---
 
 ## 📋 Implementation Status
+
+```mermaid
+quadrantChart
+    title Component Maturity vs Test Coverage
+    x-axis Low Coverage --> High Coverage
+    y-axis Experimental --> Production-Ready
+    quadrant-1 Ship it
+    quadrant-2 Needs more tests
+    quadrant-3 Prototype
+    quadrant-4 Over-tested?
+    FineGrainedGating: [0.45, 0.85]
+    DPLRTransition: [0.45, 0.85]
+    StateManager: [0.45, 0.85]
+    KDALayer: [0.55, 0.90]
+    ChunkwiseParallelKDA: [0.65, 0.80]
+    MLALayer: [0.55, 0.78]
+    TritonKernels: [0.80, 0.75]
+    KDAVLLMAdapter: [0.82, 0.72]
+```
 
 | <sub>Component</sub> | <sub>Version</sub> | <sub>Stability</sub> | <sub>Tests</sub> | <sub>Known Limitations</sub> |
 |-----------|---------|-----------|-------|-------------------|
@@ -788,6 +884,19 @@ mypy src/             # type-check
 4. Export from `src/kda/__init__.py`
 5. Add integration coverage in `tests/kda/test_integration.py`
 
+```mermaid
+flowchart LR
+    NEW(["New idea"]) --> MOD(["1. src/kda/\nnew_module.py"])
+    MOD --> SPEC(["2. Spec comments\nKDA-MOD-CLS-001"])
+    SPEC --> TEST(["3. tests/kda/\ntest_new_module.py"])
+    TEST --> EXPORT(["4. __init__.py\nexport"])
+    EXPORT --> INTEG(["5. test_integration.py\nend-to-end test"])
+    INTEG --> PR(["6. Pull Request"])
+    style MOD fill:#4a90d9,color:#fff
+    style TEST fill:#5cb85c,color:#fff
+    style PR fill:#e8a838,color:#000
+```
+
 <details>
 <summary>📐 Spec Comment Format</summary>
 
@@ -844,6 +953,23 @@ Branch naming: `feature/<component>`, `fix/<issue>`, `perf/<scope>`.
 ## 🤝 Contributing
 
 Contributions are welcome. Please open an issue before starting significant work.
+
+```mermaid
+flowchart TD
+    IDEA(["💡 Idea / Bug"]) --> ISSUE(["Open GitHub Issue\ndescribe scope"])
+    ISSUE --> FORK(["Fork repo\ngit checkout -b feature/name"])
+    FORK --> CODE(["Implement changes\n+ spec comments"])
+    CODE --> TEST(["pytest tests/ -q\n✅ 130 must pass"])
+    TEST -- fails --> CODE
+    TEST -- passes --> FMT(["black src/ tests/"])
+    FMT --> PR(["Open Pull Request\nagainst main"])
+    PR --> REVIEW{Code review}
+    REVIEW -- changes requested --> CODE
+    REVIEW -- approved --> MERGE(["Squash merge"])
+    style TEST fill:#5cb85c,color:#fff
+    style MERGE fill:#4a90d9,color:#fff
+    style IDEA fill:#e8a838,color:#000
+```
 
 <details>
 <summary>📋 Contribution Guidelines</summary>
