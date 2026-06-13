@@ -623,7 +623,7 @@ flowchart LR
     style SG fill:#5cb85c,color:#fff
 ```
 
-> **Scalar gate** (traditional): one number per head — all K memory dimensions forget at the same rate.  
+> **Scalar gate** (traditional): one number per head — all K memory dimensions forget at the same rate.
 > **Vector gate** (KDA): K numbers per head — each memory dimension has its own independent decay rate.
 
 ### 🔄 Constrained DPLR Transition
